@@ -25,18 +25,42 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
           import base64, hashlib
-          parts = sorted(Path("bootstrap").glob("gate3.part*.b64"))
-          if len(parts) != 4:
-              raise SystemExit(f"expected 4 payload parts, got {len(parts)}")
-          encoded = "".join(p.read_text().strip() for p in parts)
+
+          ordered = [
+              ("bootstrap/gate3.part01.b64", 8956),
+              ("bootstrap/gate3.part02.b64", 8956),
+              ("bootstrap/gate3.part03a.b64", 4478),
+              ("bootstrap/gate3.part03b1.b64", 1120),
+              ("bootstrap/gate3.part03b2.b64", 1120),
+              ("bootstrap/gate3.part03b31.b64", 280),
+              ("bootstrap/gate3.part03b32.b64", 280),
+              ("bootstrap/gate3.part03b33.b64", 280),
+              ("bootstrap/gate3.part03b34.b64", 280),
+              ("bootstrap/gate3.part03b4.b64", 1118),
+              ("bootstrap/gate3.part04.b64", 8964),
+          ]
+
+          chunks = []
+          for name, expected_len in ordered:
+              text = Path(name).read_text().strip()
+              if len(text) != expected_len:
+                  raise SystemExit(f"{name}: expected length {expected_len}, got {len(text)}")
+              chunks.append(text)
+
+          encoded = "".join(chunks)
+          if len(encoded) != 35832:
+              raise SystemExit(f"encoded length mismatch: {len(encoded)}")
+
           data = base64.b64decode(encoded, validate=True)
           digest = hashlib.sha256(data).hexdigest()
           expected = "4bc329a5ec6ac870ce89d198c94223a26f3965c316266abfae9a759351fd772e"
           print("gate3 sha256:", digest)
           if digest != expected:
               raise SystemExit(f"SHA mismatch: expected {expected}, got {digest}")
+
           Path("/tmp/CookingImprovementApp_firstIPA-gate3.zip").write_bytes(data)
           PY
+
           rm -rf "$RUNNER_TEMP/gate3"
           mkdir -p "$RUNNER_TEMP/gate3"
           unzip -q /tmp/CookingImprovementApp_firstIPA-gate3.zip -d "$RUNNER_TEMP/gate3"
