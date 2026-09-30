@@ -3,7 +3,12 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-plutil -lint iOS/CookingImprovementApp.xcodeproj/project.pbxproj
+if command -v plutil >/dev/null 2>&1; then
+  plutil -lint iOS/CookingImprovementApp.xcodeproj/project.pbxproj
+else
+  echo "plutil unavailable: defer Xcode project plist lint to macOS build gate"
+fi
+
 python3 - <<'PY'
 from pathlib import Path
 import re, xml.etree.ElementTree as ET
