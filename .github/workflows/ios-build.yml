@@ -1,0 +1,145 @@
+name: iOS Build Gate
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'Package.swift'
+      - 'Scripts/**'
+      - 'Sources/**'
+      - 'Tests/**'
+      - 'iOS/**'
+      - '.github/workflows/ios-build.yml'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'Package.swift'
+      - 'Scripts/**'
+      - 'Sources/**'
+      - 'Tests/**'
+      - 'iOS/**'
+      - '.github/workflows/ios-build.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Static source and pure Swift verification
+        run: |
+          set -o pipefail
+          bash Scripts/static-gate.sh | tee static-gate.log
+
+      - name: Upload preflight diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: preflight-diagnostics
+          if-no-files-found: ignore
+          path: static-gate.log
+
+  build:
+    needs: preflight
+    runs-on: macos-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show environment
+        run: |
+          sw_vers
+          xcodebuild -version
+          swift --version
+
+      - name: Validate Xcode project
+        run: |
+          plutil -lint iOS/CookingImprovementApp.xcodeproj/project.pbxproj
+          xcodebuild -list -project iOS/CookingImprovementApp.xcodeproj
+
+      - name: Build iOS Simulator
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project iOS/CookingImprovementApp.xcodeproj \
+            -scheme CookingImprovementApp \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO \
+            -derivedDataPath DerivedData-sim \
+            clean build | tee xcodebuild-simulator.log
+
+      - name: Select available iPhone simulator
+        id: simulator
+        shell: bash
+        run: |
+          set -euo pipefail
+          UDID="$(xcrun simctl list devices available --json | python3 -c '
+          import json,sys
+          data=json.load(sys.stdin)
+          for runtime, devices in data.get("devices", {}).items():
+              if "iOS" not in runtime:
+                  continue
+              for d in devices:
+                  if d.get("isAvailable") and d.get("name", "").startswith("iPhone"):
+                      print(d["udid"])
+                      raise SystemExit(0)
+          raise SystemExit("No available iPhone simulator found")
+          ')"
+          echo "udid=$UDID" >> "$GITHUB_OUTPUT"
+          xcrun simctl boot "$UDID" || true
+          xcrun simctl bootstatus "$UDID" -b
+
+      - name: SwiftData simulator smoke test
+        run: |
+          set -o pipefail
+          xcodebuild test \
+            -project iOS/CookingImprovementApp.xcodeproj \
+            -scheme CookingImprovementApp \
+            -configuration Debug \
+            -destination 'platform=iOS Simulator,id=${{ steps.simulator.outputs.udid }}' \
+            CODE_SIGNING_ALLOWED=NO \
+            -derivedDataPath DerivedData-test \
+            -resultBundlePath TestResults.xcresult \
+            | tee xcodebuild-test.log
+
+      - name: Build unsigned iPhone app
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project iOS/CookingImprovementApp.xcodeproj \
+            -scheme CookingImprovementApp \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGNING_ALLOWED=NO \
+            -derivedDataPath DerivedData-device \
+            build | tee xcodebuild-device.log
+
+      - name: Upload unsigned device app
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: CookingImprovementApp-unsigned-device
+          if-no-files-found: error
+          path: DerivedData-device/Build/Products/Release-iphoneos/CookingImprovementApp.app
+
+      - name: Upload Xcode diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: apple-gate-diagnostics
+          if-no-files-found: ignore
+          path: |
+            xcodebuild-simulator.log
+            xcodebuild-test.log
+            xcodebuild-device.log
+            TestResults.xcresult
