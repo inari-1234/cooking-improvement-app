@@ -1,0 +1,152 @@
+name: Bootstrap gate3 and Apple Gate
+
+on:
+  push:
+    paths:
+      - '.github/workflows/bootstrap-gate3.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  bootstrap-and-apple-gate:
+    runs-on: macos-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reconstruct and verify gate3 ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import base64, hashlib
+          parts = sorted(Path("bootstrap").glob("gate3.part*.b64"))
+          if len(parts) != 4:
+              raise SystemExit(f"expected 4 payload parts, got {len(parts)}")
+          encoded = "".join(p.read_text().strip() for p in parts)
+          data = base64.b64decode(encoded, validate=True)
+          digest = hashlib.sha256(data).hexdigest()
+          expected = "4bc329a5ec6ac870ce89d198c94223a26f3965c316266abfae9a759351fd772e"
+          print("gate3 sha256:", digest)
+          if digest != expected:
+              raise SystemExit(f"SHA mismatch: expected {expected}, got {digest}")
+          Path("/tmp/CookingImprovementApp_firstIPA-gate3.zip").write_bytes(data)
+          PY
+          rm -rf "$RUNNER_TEMP/gate3"
+          mkdir -p "$RUNNER_TEMP/gate3"
+          unzip -q /tmp/CookingImprovementApp_firstIPA-gate3.zip -d "$RUNNER_TEMP/gate3"
+          test -f "$RUNNER_TEMP/gate3/CookingImprovementApp/Package.swift"
+
+      - name: Import verified gate3 source to repository
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp -R "$RUNNER_TEMP/gate3/CookingImprovementApp/." .
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add README.md Package.swift Scripts Sources Tests iOS .github/workflows/ios-build.yml
+          if git diff --cached --quiet; then
+            echo "gate3 source already imported"
+          else
+            git commit -m "Import verified gate3 source"
+            git push origin HEAD:main
+          fi
+
+      - name: Xcode version
+        run: xcodebuild -version
+
+      - name: Pure Swift package tests
+        run: |
+          set -o pipefail
+          swift test -c debug | tee swift-test-debug.log
+          swift test -c release | tee swift-test-release.log
+
+      - name: Validate Xcode project
+        run: |
+          plutil -lint iOS/CookingImprovementApp.xcodeproj/project.pbxproj
+          xcodebuild -list -project iOS/CookingImprovementApp.xcodeproj
+
+      - name: Build iOS Simulator app
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project iOS/CookingImprovementApp.xcodeproj \
+            -scheme CookingImprovementApp \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO \
+            -derivedDataPath DerivedData-sim \
+            clean build | tee xcodebuild-simulator.log
+
+      - name: Select available iPhone simulator
+        id: simulator
+        shell: bash
+        run: |
+          set -euo pipefail
+          UDID="$(xcrun simctl list devices available --json | python3 -c '
+          import json,sys
+          data=json.load(sys.stdin)
+          for runtime, devices in data.get("devices", {}).items():
+              if "iOS" not in runtime:
+                  continue
+              for d in devices:
+                  if d.get("isAvailable") and d.get("name", "").startswith("iPhone"):
+                      print(d["udid"])
+                      raise SystemExit(0)
+          raise SystemExit("No available iPhone simulator found")
+          ')"
+          echo "udid=$UDID" >> "$GITHUB_OUTPUT"
+          xcrun simctl boot "$UDID" || true
+          xcrun simctl bootstatus "$UDID" -b
+
+      - name: Run SwiftData simulator smoke tests
+        run: |
+          set -o pipefail
+          xcodebuild test \
+            -project iOS/CookingImprovementApp.xcodeproj \
+            -scheme CookingImprovementApp \
+            -configuration Debug \
+            -destination 'platform=iOS Simulator,id=${{ steps.simulator.outputs.udid }}' \
+            CODE_SIGNING_ALLOWED=NO \
+            -derivedDataPath DerivedData-test \
+            -resultBundlePath TestResults.xcresult \
+            | tee xcodebuild-test.log
+
+      - name: Build unsigned iPhone device binary
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project iOS/CookingImprovementApp.xcodeproj \
+            -scheme CookingImprovementApp \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGNING_ALLOWED=NO \
+            -derivedDataPath DerivedData-device \
+            build | tee xcodebuild-device.log
+
+      - name: Upload unsigned device app
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: CookingImprovementApp-unsigned-device
+          if-no-files-found: error
+          path: DerivedData-device/Build/Products/Release-iphoneos/CookingImprovementApp.app
+
+      - name: Upload diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate3-apple-diagnostics
+          if-no-files-found: ignore
+          path: |
+            swift-test-debug.log
+            swift-test-release.log
+            xcodebuild-simulator.log
+            xcodebuild-device.log
+            xcodebuild-test.log
+            TestResults.xcresult
