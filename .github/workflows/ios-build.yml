@@ -1,3 +1,4 @@
+# Public CI layout: Ubuntu preflight -> macOS Apple gate.
 name: iOS Build Gate
 
 on:
