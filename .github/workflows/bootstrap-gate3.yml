@@ -10,11 +10,13 @@ permissions:
   contents: write
 
 jobs:
-  bootstrap-and-apple-gate:
-    runs-on: macos-latest
-    timeout-minutes: 40
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Reconstruct and verify gate3 ZIP
         shell: bash
@@ -40,14 +42,16 @@ jobs:
           unzip -q /tmp/CookingImprovementApp_firstIPA-gate3.zip -d "$RUNNER_TEMP/gate3"
           test -f "$RUNNER_TEMP/gate3/CookingImprovementApp/Package.swift"
 
-      - name: Import verified gate3 source to repository
+      - name: Import verified gate3 source
         shell: bash
         run: |
           set -euo pipefail
-          cp -R "$RUNNER_TEMP/gate3/CookingImprovementApp/." .
+          SOURCE="$RUNNER_TEMP/gate3/CookingImprovementApp"
+          rm -f "$SOURCE/.github/workflows/ios-build.yml"
+          cp -R "$SOURCE/." .
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add README.md Package.swift Scripts Sources Tests iOS .github/workflows/ios-build.yml
+          git add README.md Package.swift Scripts Sources Tests iOS
           if git diff --cached --quiet; then
             echo "gate3 source already imported"
           else
@@ -55,21 +59,40 @@ jobs:
             git push origin HEAD:main
           fi
 
-      - name: Xcode version
-        run: xcodebuild -version
+      - name: Repository preflight
+        run: |
+          test -f Package.swift
+          test -f Scripts/static-gate.sh
+          test -f iOS/CookingImprovementApp.xcodeproj/project.pbxproj
+          test -f iOS/CookingImprovementAppTests/SwiftDataSmokeTests.swift
 
-      - name: Pure Swift package tests
+  build:
+    needs: preflight
+    runs-on: macos-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Show environment
+        run: |
+          sw_vers
+          xcodebuild -version
+          swift --version
+
+      - name: Static and pure Swift gate
         run: |
           set -o pipefail
-          swift test -c debug | tee swift-test-debug.log
-          swift test -c release | tee swift-test-release.log
+          bash Scripts/static-gate.sh | tee static-gate.log
 
       - name: Validate Xcode project
         run: |
           plutil -lint iOS/CookingImprovementApp.xcodeproj/project.pbxproj
           xcodebuild -list -project iOS/CookingImprovementApp.xcodeproj
 
-      - name: Build iOS Simulator app
+      - name: Build iOS Simulator
         run: |
           set -o pipefail
           xcodebuild \
@@ -103,7 +126,7 @@ jobs:
           xcrun simctl boot "$UDID" || true
           xcrun simctl bootstatus "$UDID" -b
 
-      - name: Run SwiftData simulator smoke tests
+      - name: SwiftData simulator smoke test
         run: |
           set -o pipefail
           xcodebuild test \
@@ -116,7 +139,7 @@ jobs:
             -resultBundlePath TestResults.xcresult \
             | tee xcodebuild-test.log
 
-      - name: Build unsigned iPhone device binary
+      - name: Build unsigned iPhone app
         run: |
           set -o pipefail
           xcodebuild \
@@ -144,8 +167,7 @@ jobs:
           name: gate3-apple-diagnostics
           if-no-files-found: ignore
           path: |
-            swift-test-debug.log
-            swift-test-release.log
+            static-gate.log
             xcodebuild-simulator.log
             xcodebuild-device.log
             xcodebuild-test.log
