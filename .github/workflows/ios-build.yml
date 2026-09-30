@@ -121,8 +121,43 @@ jobs:
             -sdk iphoneos \
             -destination 'generic/platform=iOS' \
             CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY='' \
             -derivedDataPath DerivedData-device \
             build | tee xcodebuild-device.log
+
+      - name: Package sideload IPA
+        run: |
+          set -euo pipefail
+          APP="$PWD/DerivedData-device/Build/Products/Release-iphoneos/CookingImprovementApp.app"
+          IPA="$PWD/CookingImprovementApp-v0.1.0-build1-sideload.ipa"
+          test -d "$APP"
+          rm -rf ipa-package
+          mkdir -p ipa-package/Payload
+          cp -R "$APP" ipa-package/Payload/
+          ditto -c -k --sequesterRsrc --keepParent ipa-package/Payload "$IPA"
+
+      - name: Verify IPA
+        run: |
+          set -euo pipefail
+          rm -rf verify-ipa
+          mkdir verify-ipa
+          cd verify-ipa
+          unzip -q ../CookingImprovementApp-v0.1.0-build1-sideload.ipa
+          APP=Payload/CookingImprovementApp.app
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Info.plist")" = "com.example.CookingImprovementApp"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Info.plist")" = "0.1.0"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP/Info.plist")" = "1"
+          file "$APP/CookingImprovementApp" | grep -q arm64
+          echo "IPA verification: PASS"
+
+      - name: Upload sideload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: CookingImprovementApp-v0.1.0-build1-sideload-ipa
+          if-no-files-found: error
+          retention-days: 14
+          path: CookingImprovementApp-v0.1.0-build1-sideload.ipa
 
       - name: Upload unsigned device app
         if: success()
