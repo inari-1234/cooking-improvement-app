@@ -96,8 +96,7 @@ jobs:
           raise SystemExit("No available iPhone simulator found")
           ')"
           echo "udid=$UDID" >> "$GITHUB_OUTPUT"
-          xcrun simctl boot "$UDID" || true
-          xcrun simctl bootstatus "$UDID" -b
+          echo "Selected simulator: $UDID"
 
       - name: SwiftData simulator smoke test
         run: |
